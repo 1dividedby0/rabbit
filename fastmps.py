@@ -52,4 +52,6 @@ def rec(state_v, parent_shape, left, depth, N, chi=1e50):
     if N %2 == 1:
         dims[1]+=1
     return rec(U, new_.shape, True, depth+1, dims[0], chi) + [np.diag(norm(S))] + rec(V, new_.shape, False, depth+1, dims[1], chi)
+
+
     
