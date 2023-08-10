@@ -1,5 +1,40 @@
 using ITensors
 using Plots
+# using KrylovKit
+using LinearAlgebra
+using MKL
+
+ITensors.op(::OpName"z",::SiteType"S=1/2") = [1, 0, 0, -1]
+ITensors.op(::OpName"x",::SiteType"S=1/2") = [0, 1, 1, 0]
+
+mutable struct RydbergObserver <: AbstractObserver
+    energy_tol::Float64
+    last_energy::Float64
+
+    RydbergObserver(energy_tol=0.0) = new(energy_tol, 1000.0)
+end
+
+function ITensors.checkdone!(o::RydbergObserver;kwargs...)
+    sw = kwargs[:sweep]
+    energy = kwargs[:energy]
+    if abs(energy-o.last_energy)/abs(energy) < o.energy_tol
+        # early stopping
+        return true
+    end
+    o.last_energy = energy
+    return false
+end
+
+function ITensors.measure!(o::RydbergObserver;kwargs...)
+    energy = kwargs[:energy]
+    sweep = kwargs[:sweep]
+    bond = kwargs[:bond]
+    outputlevel = kwargs[:outputlevel]
+
+    # if outputlevel > 0
+    #     println("Sweep $sweep at bond $bond, the energy is $energy")
+    # end
+end
 
 # assume k = 6
 function blockade_radius(rabi_f)
@@ -7,9 +42,9 @@ function blockade_radius(rabi_f)
     return (C6/rabi_f)^(1/6)
 end
 
-function interaction_strength(a, b, N)
+function interaction_strength(a, b)
     C6 = 2*pi * 275 * 10^9 # Interaction Coefficient for n (quantum number) = 61 (Hz)
-    lattice_spacing = 3.6 # lattice constant
+    lattice_spacing = 3.6 # lattice constant (micrometers)
 
     V_nn = 2*pi*60*(10^6)
     V_nnn = 2*pi*2.3*(10^6)
@@ -28,7 +63,7 @@ function on_site_detuning(site, N)
     det = 0
     for j=1:N
         if j != site
-            det += interaction_strength(site, j, N)
+            det += interaction_strength(site, j)
         end
     end
     return -0.5 * det
@@ -38,24 +73,34 @@ function interactions(site, N)
     os = OpSum()
     for j=1:N
         if j != site
-            os += interaction_strength(site, j, N), "Sz", site, "Sz", j
+            os += 0.125 * interaction_strength(site, j), "z", site, "z", j
         end
     end
     return os
 end
 
-function rydberg(N, sites, rabi_f, delta)
+function display_mpo_elements(H)
+    N = length(H)
+    for n=1:N
+        println("Tensor $n of the MPO:")
+        println(H[n])
+        println("------")
+    end
+end
+
+function rydberg(N, rabi_f, delt)
     os = OpSum()
     for site=1:N
-        os += 0.5 * rabi_f, "Sx", site
-        os += -0.5 * (delta + on_site_detuning(site, N)), "Sz", site
-        os += 0.25 * interactions(site, N)
+        os += 0.5 * rabi_f, "x", site
+        os += -0.5 * (delt + on_site_detuning(site, N)), "z", site
+        os += interactions(site, N)
     end
-    H = MPO(os, sites)
     
     # println(combiner(sites)*contract(H))
+    # @show H
+    # display_mpo_elements(os)
 
-    return H
+    return os
 end
 
 function rydberg3(sites, rabi_f, delta)
@@ -68,12 +113,12 @@ function rydberg3(sites, rabi_f, delta)
     os+= 0.25*V_nn, "Sz", 3, "Sz", 2
     os+= 0.25*V_nnn, "Sz", 1, "Sz", 3
     os+= 0.25*V_nnn, "Sz", 3, "Sz", 1
-    os+= rabi_f, "Sx", 1
-    os+= rabi_f, "Sx", 2
-    os+= rabi_f, "Sx", 3
-    os+= (-delta+0.5*(V_nn + V_nnn)), "Sz", 1
-    os+= (-delta+0.5*(V_nn + V_nn)), "Sz", 2
-    os+= (-delta+0.5*(V_nn + V_nnn)), "Sz", 3
+    os+= 0.5 * rabi_f, "Sx", 1
+    os+= 0.5 * rabi_f, "Sx", 2
+    os+= 0.5 * rabi_f, "Sx", 3
+    os+= 0.5 * (-delta+0.5*(V_nn + V_nnn)), "Sz", 1
+    os+= 0.5 * (-delta+0.5*(V_nn + V_nn)), "Sz", 2
+    os+= 0.5 * (-delta+0.5*(V_nn + V_nnn)), "Sz", 3
 
     H = MPO(os, sites)
 
@@ -93,18 +138,54 @@ function bipartite_entropy(psi)
     return SvN
 end
 
-function ground_state_entropy(N, rabi_f, delta)
+function mpo_to_matrix(H::MPO)
+    # Convert MPO to ITensor
+    T = copy(H[1])
+    for n = 2:length(H)
+        T *= H[n]
+    end
+
+    all_inds = inds(T)
+
+    row_inds = all_inds[1:3]
+    col_inds = all_inds[4:6]
+
+    row_combiner = combiner(row_inds...)
+    col_combiner = combiner(col_inds...)
+
+    T_matrix = row_combiner * T * col_combiner
+
+    return T_matrix
+end
+
+function ed_energy(N)
     sites = siteinds("S=1/2", N)
 
-    H = rydberg(N, sites, rabi_f, delta)
+    H = MPO(rydberg(N, 2*pi*6.4*(10^6), 0), sites)
 
-    psi0 = randomMPS(sites, 10)
+    println(mpo_to_matrix(H))
+
+    initstate(j) = isodd(j) ? "↑" : "↓"
+    psi0 = randomMPS(sites, initstate; linkdims=10)
+
+    vals, vecs, info = @time eigsolve(
+        contract(H), contract(psi0), 1, :SR; ishermitian=true, tol=1e-6, krylovdim=30, eager=true
+    )
+    @show vals[1]
+    # @show vecs
+end
+
+function ground_state_entropy(N, psi0, sites, rabi_f, delt)
+    H = MPO(rydberg(N, rabi_f, delt), sites)
 
     nsweeps = 5
     maxdim = [10,20,100,100,200]
     cutoff = [1E-10]
 
-    energy, psi = dmrg(H, psi0; nsweeps, maxdim, cutoff)
+    etol = 1E-6
+
+    obs = RydbergObserver(etol)
+    energy, psi = dmrg(H, psi0; nsweeps, maxdim, cutoff, observer=obs, outputlevel=1, println=false)
     # combin = combiner(sites)
     # println(combin * contract(psi))
     # println(energy)
@@ -113,57 +194,52 @@ function ground_state_entropy(N, rabi_f, delta)
 end
 
 function main()
-    N = 100
+    N = 40
     V_nn = 2*pi*60*(10^6)
     V_nnn = 2*pi*2.3*(10^6)
     rabi_f = 2*pi*6.4*(10^6)
+    resolution = 35
 
-    freq = (10 .^ range(-4, stop=1, length=10)) .* V_nn
-    deltas = (10 .^ range(-4, stop=1, length=10)) .* V_nn
+    freq = (10 .^ range(-4, stop=1, length=resolution)) .* V_nn
+    deltas = (10 .^ range(-4, stop=1, length=resolution)) .* V_nn
     entropies = Array{Float64}(undef, length(freq), length(deltas))
 
-    lattice_spacing = 3.6 # lattice constant
-
     # println(ground_state_entropy(N, rabi_f, 0))
-    # os = OpSum()
-    # os+=0.25*V_nn, "Sz", 1, "Sz", 2
-    # os+=0.25*V_nn, "Sz", 2, "Sz", 3
-    # os+=0.25*V_nnn, "Sz", 1, "Sz", 3
-    # os+=0.5*rabi_f, "Sx", 1
-    # os+=0.5*rabi_f, "Sx", 2
-    # os+=0.5*rabi_f, "Sx", 3
-    # os+=0.25*(V_nn + V_nnn), "Sz", 1
-    # os+=0.25*(V_nn + V_nn), "Sz", 2
-    # os+=0.25*(V_nn + V_nnn), "Sz", 3
+    # ed_energy(N)
 
     # H = MPO(os, siteinds("S=1/2", 3))
     # println(contract(H))
     # sites = siteinds("S=1/2", 2)
     # println(combiner(sites) * rydberg(2, sites, rabi_f, 0))
 
-    # for i = 1:length(freq)
-    #     for j = 1:length(deltas)
-    #         entropies[i,j] = ground_state_entropy(N, freq[i], deltas[j])
-    #     end
-    # end
+    sites = siteinds("S=1/2", N)
+    psi0 = MPS(sites, [i%3 == 1 ? "Dn" : "Up" for i=1:N]) # Spin down is Rydberg state
+    # psi0 = MPS(sites, ["Up" for i=1:N])
 
-    # X = log10.(freq)
-    # Y = log10.(deltas)
-
-    Y = freq
-    X = collect(range(0.1, stop=3, length=10))
-
-    entropies = Array{Float64}(undef, length(Y), length(X))
-
-    for i = 1:length(Y)
-        for j = 1:length(X)
-            entropies[i,j] = ground_state_entropy(N, Y[i], X[j]*Y[i])
+    for i = 1:length(freq)
+        for j = 1:length(deltas)
+            entropies[i,j] = ground_state_entropy(N, psi0, sites, freq[i], deltas[j])
         end
     end
 
-    Y = sort(Y.^(-1/6))
-    entropies = reverse(entropies)
-    # Compute the step size for X and Y
+    X = log10.(freq)
+    Y = log10.(deltas)
+
+    # Y = freq
+    # X = collect(range(0.1, stop=3, length=resolution))
+
+    # entropies = Array{Float64}(undef, length(Y), length(X))
+
+    # for i = 1:length(Y)
+    #     for j = 1:length(X)
+    #         println((i-1) * length(X) + j)
+    #         entropies[i,j] = ground_state_entropy(N, psi0, sites, Y[i], X[j]*Y[i])
+    #     end
+    # end
+
+    # Y = sort(Y.^(-1/6))
+    # entropies = reverse(entropies)
+    
     deltaX = (maximum(X) - minimum(X)) / length(X)
     deltaY = (maximum(Y) - minimum(Y)) / length(Y)
 
@@ -171,27 +247,27 @@ function main()
     adjusted_xlims = (minimum(X) - 0.5 * deltaX, maximum(X) + 0.5 * deltaX)
     adjusted_ylims = (minimum(Y) - 0.5 * deltaY, maximum(Y) + 0.5 * deltaY)
 
-    # heatmap(
-    #     X, Y, entropies,
-    #     xlims=adjusted_xlims,
-    #     ylims=adjusted_ylims,
-    #     color=:viridis,
-    #     aspect_ratio=:auto,
-    #     xlabel="log Ω",
-    #     ylabel="log Δ",
-    #     colorbar_title="Bipartite Entropy"
-    # )
-
     heatmap(
         X, Y, entropies,
         xlims=adjusted_xlims,
         ylims=adjusted_ylims,
         color=:viridis,
         aspect_ratio=:auto,
-        xlabel="Δ/Ω",
-        ylabel="Ω^(-1/6) ~ R_b/a",
+        xlabel="log Ω",
+        ylabel="log Δ",
         colorbar_title="Bipartite Entropy"
     )
+
+    # heatmap(
+    #     X, Y, entropies,
+    #     xlims=adjusted_xlims,
+    #     ylims=adjusted_ylims,
+    #     color=:viridis,
+    #     aspect_ratio=:auto,
+    #     xlabel="Δ/Ω",
+    #     ylabel="Ω^(-1/6) ~ R_b/a",
+    #     colorbar_title="Bipartite Entropy"
+    # )
     savefig("filename.png")
 
     return
