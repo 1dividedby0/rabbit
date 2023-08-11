@@ -175,7 +175,7 @@ function ed_energy(N)
     # @show vecs
 end
 
-function ground_state_entropy(N, psi0, sites, rabi_f, delt)
+function ground_state(N, psi0, sites, rabi_f, delt)
     H = MPO(rydberg(N, rabi_f, delt), sites)
 
     nsweeps = 5
@@ -185,23 +185,123 @@ function ground_state_entropy(N, psi0, sites, rabi_f, delt)
     etol = 1E-6
 
     obs = RydbergObserver(etol)
-    energy, psi = dmrg(H, psi0; nsweeps, maxdim, cutoff, observer=obs, outputlevel=1, println=false)
+    energy, psi = dmrg(H, psi0; nsweeps, maxdim, cutoff, observer=obs, outputlevel=0, println=false)
     # combin = combiner(sites)
     # println(combin * contract(psi))
     # println(energy)
     entropy = bipartite_entropy(psi)
-    return entropy
+    return entropy, energy
 end
 
-function main()
-    N = 40
+function qpt(N, resolution, separation_assumption, start, stop, stop1)
     V_nn = 2*pi*60*(10^6)
     V_nnn = 2*pi*2.3*(10^6)
     rabi_f = 2*pi*6.4*(10^6)
-    resolution = 35
 
-    freq = (10 .^ range(-4, stop=1, length=resolution)) .* V_nn
-    deltas = (10 .^ range(-4, stop=1, length=resolution)) .* V_nn
+    freq = (10 .^ range(start, stop=stop, length=resolution)) .* V_nn
+
+    sites = siteinds("S=1/2", N)
+    psi0 = MPS(sites, [i%separation_assumption == 1 ? "Up" : "Dn" for i=1:N]) # Spin down is ground state
+    # # psi0 = MPS(sites, ["Up" for i=1:N])
+
+    Y = freq
+    X = collect(range(0.0, stop=stop1, length=resolution))
+
+    energies = Array{Float64}(undef, length(Y), length(X))
+
+    for i = 1:length(Y)
+        for j = 1:length(X)
+            # println((i-1) * length(X) + j)
+            energies[i,j] = ground_state(N, psi0, sites, Y[i], X[j]*Y[i])[2]
+        end
+    end
+
+    Y = sort(Y.^(-1/6))
+    energies = reverse(energies)
+
+    second = Array{Float64}(undef, length(Y), length(X))
+
+    # compute QPT points
+    for i = 1:length(Y)
+        for j = 2:length(X)-1
+            b = (energies[i,j+1]-energies[i,j]) / (X[j+1] - X[j])
+            a = (energies[i, j] - energies[i, j-1]) / (X[j] - X[j-1])
+            hessian = abs((b - a) / (X[j+1] - X[j-1])) # not hessian
+            second[i, j] = hessian
+        end
+    end
+
+    deltaX = (maximum(X) - minimum(X)) / length(X)
+    deltaY = (maximum(Y) - minimum(Y)) / length(Y)
+
+    # Adjust the plot limits to ensure cells are not cut off
+    adjusted_xlims = (minimum(X) - 0.5 * deltaX, maximum(X) + 0.5 * deltaX)
+    adjusted_ylims = (minimum(Y) - 0.5 * deltaY, maximum(Y) + 0.5 * deltaY)
+
+    return heatmap(
+        X, Y, second,
+        xlims=adjusted_xlims,
+        ylims=adjusted_ylims,
+        color=:viridis,
+        aspect_ratio=:auto,
+        xlabel="Δ/Ω",
+        ylabel="Ω^(-1/6) ~ R_b/a",
+        colorbar_title="Second Derivative of Energy"
+    )
+end
+
+function stand(N, resolution, separation_assumption, start, stop, stop2)
+    V_nn = 2*pi*60*(10^6)
+    V_nnn = 2*pi*2.3*(10^6)
+    rabi_f = 2*pi*6.4*(10^6)
+
+    freq = (10 .^ range(start, stop=stop, length=resolution)) .* V_nn
+
+    sites = siteinds("S=1/2", N)
+    psi0 = MPS(sites, [i%separation_assumption == 1 ? "Up" : "Dn" for i=1:N]) # Spin down is ground state
+
+    Y = freq
+    X = collect(range(0.0, stop=stop2, length=resolution))
+
+    entropies = Array{Float64}(undef, length(Y), length(X))
+
+    for i = 1:length(Y)
+        for j = 1:length(X)
+            # println((i-1) * length(X) + j)
+            entropies[i,j] = ground_state(N, psi0, sites, Y[i], X[j]*Y[i])[1]
+        end
+    end
+
+    Y = sort(Y.^(-1/6))
+    entropies = reverse(entropies)
+    # Y = log2.(Y)
+    
+    deltaX = (maximum(X) - minimum(X)) / length(X)
+    deltaY = (maximum(Y) - minimum(Y)) / length(Y)
+
+    # Adjust the plot limits to ensure cells are not cut off
+    adjusted_xlims = (minimum(X) - 0.5 * deltaX, maximum(X) + 0.5 * deltaX)
+    adjusted_ylims = (minimum(Y) - 0.5 * deltaY, maximum(Y) + 0.5 * deltaY)
+
+    return heatmap(
+        X, Y, entropies,
+        # xlims=adjusted_xlims,
+        # ylims=adjusted_ylims,
+        color=:viridis,
+        aspect_ratio=:auto,
+        xlabel="Δ/Ω",
+        ylabel="Ω^(-1/6) ~ R_b/a",
+        colorbar_title="Bipartite Entropy"
+    )
+end
+
+function second(N, resolution, separation_assumption, start, stop, start1, stop1)
+    V_nn = 2*pi*60*(10^6)
+    V_nnn = 2*pi*2.3*(10^6)
+    rabi_f = 2*pi*6.4*(10^6)
+
+    freq = (10 .^ range(start, stop=stop, length=resolution)) .* V_nn
+    deltas = (10 .^ range(start1, stop=stop1, length=resolution)) .* V_nn
     entropies = Array{Float64}(undef, length(freq), length(deltas))
 
     # println(ground_state_entropy(N, rabi_f, 0))
@@ -213,32 +313,18 @@ function main()
     # println(combiner(sites) * rydberg(2, sites, rabi_f, 0))
 
     sites = siteinds("S=1/2", N)
-    psi0 = MPS(sites, [i%3 == 1 ? "Dn" : "Up" for i=1:N]) # Spin down is Rydberg state
+    psi0 = MPS(sites, [i%separation_assumption == 1 ? "Up" : "Dn" for i=1:N]) # Spin down is ground state
     # psi0 = MPS(sites, ["Up" for i=1:N])
 
     for i = 1:length(freq)
         for j = 1:length(deltas)
-            entropies[i,j] = ground_state_entropy(N, psi0, sites, freq[i], deltas[j])
+            # println((i-1) * length(deltas) + j)
+            entropies[i,j] = ground_state(N, psi0, sites, freq[i], deltas[j])[1]
         end
     end
 
     X = log10.(freq)
     Y = log10.(deltas)
-
-    # Y = freq
-    # X = collect(range(0.1, stop=3, length=resolution))
-
-    # entropies = Array{Float64}(undef, length(Y), length(X))
-
-    # for i = 1:length(Y)
-    #     for j = 1:length(X)
-    #         println((i-1) * length(X) + j)
-    #         entropies[i,j] = ground_state_entropy(N, psi0, sites, Y[i], X[j]*Y[i])
-    #     end
-    # end
-
-    # Y = sort(Y.^(-1/6))
-    # entropies = reverse(entropies)
     
     deltaX = (maximum(X) - minimum(X)) / length(X)
     deltaY = (maximum(Y) - minimum(Y)) / length(Y)
@@ -247,7 +333,7 @@ function main()
     adjusted_xlims = (minimum(X) - 0.5 * deltaX, maximum(X) + 0.5 * deltaX)
     adjusted_ylims = (minimum(Y) - 0.5 * deltaY, maximum(Y) + 0.5 * deltaY)
 
-    heatmap(
+    return heatmap(
         X, Y, entropies,
         xlims=adjusted_xlims,
         ylims=adjusted_ylims,
@@ -257,19 +343,22 @@ function main()
         ylabel="log Δ",
         colorbar_title="Bipartite Entropy"
     )
+end
 
-    # heatmap(
-    #     X, Y, entropies,
-    #     xlims=adjusted_xlims,
-    #     ylims=adjusted_ylims,
-    #     color=:viridis,
-    #     aspect_ratio=:auto,
-    #     xlabel="Δ/Ω",
-    #     ylabel="Ω^(-1/6) ~ R_b/a",
-    #     colorbar_title="Bipartite Entropy"
-    # )
-    savefig("filename.png")
-
+function main()
+    N = [3, 6, 9, 20, 40]
+    resolution = 35
+    separation_assumption = 3
+    plots_matrix = []
+    for i = 1:length(N)
+        println(i)
+        push!(plots_matrix, stand(N[i], resolution, separation_assumption, -3, 3, 5))
+        push!(plots_matrix, second(N[i], resolution, separation_assumption, -4, 2, -4, 3))
+        # push!(plots_matrix, qpt(N[i], resolution, separation_assumption, -3, 3, 5))
+    end
+    # combined_ = plot(stand(N, resolution, separation_assumption, -3, 3, 5), , layout=(3, 1), size=(600, 800))
+    combined_ = plot(plots_matrix..., layout=(length(N), 2), size=(1100, length(N)*300))
+    savefig(combined_, "filename.png")
     return
 end
 
