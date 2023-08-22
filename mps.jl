@@ -6,6 +6,7 @@ using MKL
 
 ITensors.op(::OpName"z", ::SiteType"S=1/2") = [1, 0, 0, -1]
 ITensors.op(::OpName"x", ::SiteType"S=1/2") = [0, 1, 1, 0]
+ITensors.op(::OpName"n", ::SiteType"S=1/2") = [0, 0, 0, 1]
 
 mutable struct RydbergObserver <: AbstractObserver
     energy_tol::Float64
@@ -69,15 +70,15 @@ function on_site_detuning(site, N)
     return -0.5 * det
 end
 
-function interactions(site, N)
-    os = OpSum()
-    for j = 1:N
-        if j != site
-            os += 0.125 * interaction_strength(site, j), "z", site, "z", j
-        end
-    end
-    return os
-end
+# function interactions(site, N)
+#     os = OpSum()
+#     for j = 1:N
+#         if j != site
+#             os += 0.125 * interaction_strength(site, j), "z", site, "z", j
+#         end
+#     end
+#     return os
+# end
 
 function display_mpo_elements(H)
     N = length(H)
@@ -88,12 +89,35 @@ function display_mpo_elements(H)
     end
 end
 
+# function rydberg(N, rabi_f, delt)
+#     os = OpSum()
+#     for site = 1:N
+#         os += 0.5 * rabi_f, "x", site
+#         os -= 0.5 * (delt + on_site_detuning(site, N)), "z", site
+#         os += interactions(site, N)
+#     end
+
+#     # println(combiner(sites)*contract(H))
+#     # @show H
+#     # display_mpo_elements(os)
+
+#     return os
+# end
+
+function interactions(site)
+    os = OpSum()
+    for j = 1:site-1
+        os += interaction_strength(site, j), "n", site, "n", j
+    end
+    return os
+end
+
 function rydberg(N, rabi_f, delt)
     os = OpSum()
     for site = 1:N
         os += 0.5 * rabi_f, "x", site
-        os += -0.5 * (delt + on_site_detuning(site, N)), "z", site
-        os += interactions(site, N)
+        os -= delt, "n", site
+        os += interactions(site)
     end
 
     # println(combiner(sites)*contract(H))
@@ -102,6 +126,7 @@ function rydberg(N, rabi_f, delt)
 
     return os
 end
+
 
 function rydberg3(sites, rabi_f, delta)
     V_nn = 2 * pi * 60 * (10^6)
@@ -179,7 +204,7 @@ function ground_state(N, psi0, sites, rabi_f, delt)
     H = MPO(rydberg(N, rabi_f, delt), sites)
 
     nsweeps = 15
-    maxdim = [10, 20, 100, 100, 200, 10, 20, 100, 100, 200, 10, 20, 100, 100, 200]
+    maxdim = [10, 10, 10, 20, 20, 40, 80, 100, 200, 200]
     cutoff = [1E-10]
 
     etol = 1E-10
@@ -193,18 +218,43 @@ function ground_state(N, psi0, sites, rabi_f, delt)
     return entropy, energy, psi
 end
 
+function energy_gap(N, psi0, sites, rabi_f, delt)
+    H = MPO(rydberg(N, rabi_f, delt), sites)
+
+    nsweeps = 30
+    maxdim = [10, 10, 10, 20, 20, 40, 80, 100, 200, 200]
+    cutoff = [1E-12]
+    weight = 1E15
+
+    etol = 1E-12
+
+    _, ground_energy, ground_psi = ground_state(N, psi0, sites, rabi_f, delt)
+
+    obs = RydbergObserver(etol)
+    energy, excited_psi = dmrg(H, [ground_psi], psi0; nsweeps, maxdim, cutoff, weight=weight, observer=obs, outputlevel=0, println=false)
+    gap = energy - ground_energy
+    # println(inner(excited_psi, ground_psi))
+    return gap
+end
+
 function avg_rydberg(psi)
     avgr = 0
     for i = 1:length(psi)
-        avgr += expect(psi, [1 0; 0 0]; sites=i)
+        avgr += expect(psi, "n"; sites=i)
     end
     return avgr / length(psi)
 end
 
+function measure_mps(psi)
+    measurement = []
+    for i = 1:length(psi)
+        push!(measurement, expect(psi, "n"; sites=i))
+    end
+    return measurement
+end
+
 function qpt(N, resolution, separation_assumption, start, stop, stop1, psi0, sites)
     V_nn = 2 * pi * 60 * (10^6)
-    V_nnn = 2 * pi * 2.3 * (10^6)
-    rabi_f = 2 * pi * 6.4 * (10^6)
     C6 = 2 * pi * 275 * 10^9 # Interaction Coefficient for n (quantum number) = 61 (Hz)
     a = 6
 
@@ -213,17 +263,16 @@ function qpt(N, resolution, separation_assumption, start, stop, stop1, psi0, sit
     Y = freq
     X = collect(range(0.0, stop=stop1, length=resolution))
 
-    energies = Array{Float64}(undef, length(Y), length(X))
+    energies = zeros(Float64, resolution, resolution)
 
     for i = 1:length(Y)
         for j = 1:length(X)
             println((i - 1) * length(X) + j)
-            energies[i, j] = ground_state(N, psi0, sites, Y[i], X[j] * Y[i])[2]
+            energies[i, j] = ground_state(N, psi0, sites, Y[length(Y)-i+1], X[j] * Y[length(Y)-i+1])[2]
         end
     end
 
     Y = sort(((Y .^ (-1 / 6)) .* C6^(1 / 6)) ./ a)
-    energies = reverse(energies)
 
     second = Array{Float64}(undef, length(Y), length(X))
 
@@ -264,8 +313,6 @@ end
 
 function stand(N, resolution, separation_assumption, start, stop, stop2, psi0, sites)
     V_nn = 2 * pi * 60 * (10^6)
-    V_nnn = 2 * pi * 2.3 * (10^6)
-    rabi_f = 2 * pi * 6.4 * (10^6)
     C6 = 2 * pi * 275 * 10^9 # Interaction Coefficient for n (quantum number) = 61 (Hz)
     a = 6
 
@@ -275,20 +322,19 @@ function stand(N, resolution, separation_assumption, start, stop, stop2, psi0, s
 
     X = collect(range(0.0, stop=stop2, length=resolution))
 
-    entropies = Array{Float64}(undef, length(Y), length(X))
+    entropies = zeros(Float64, resolution, resolution)
 
     for i = 1:length(Y)
         for j = 1:length(X)
             println((i - 1) * length(X) + j)
             # rabi_freq = (Y[i]*a / (C6^(1/6)))^(-6)
-            rabi_freq = Y[i]
+            rabi_freq = Y[length(Y)-i+1]
             entropies[i, j] = ground_state(N, psi0, sites, rabi_freq, X[j] * rabi_freq)[1]
         end
     end
 
     Y = sort(((Y .^ (-1 / 6)) .* C6^(1 / 6)) ./ a)
     # Y = log2.(Y)
-    entropies = reverse(entropies)
 
     deltaX = (maximum(X) - minimum(X)) / length(X)
     deltaY = (maximum(Y) - minimum(Y)) / length(Y)
@@ -311,8 +357,6 @@ end
 
 function second(N, resolution, separation_assumption, start, stop, start1, stop1, psi0, sites)
     V_nn = 2 * pi * 60 * (10^6)
-    V_nnn = 2 * pi * 2.3 * (10^6)
-    rabi_f = 2 * pi * 6.4 * (10^6)
 
     freq = (10 .^ range(start, stop=stop, length=resolution)) .* V_nn
     deltas = (10 .^ range(start1, stop=stop1, length=resolution)) .* V_nn
@@ -357,8 +401,6 @@ end
 
 function frequencies(N, resolution, separation_assumption, start, stop, stop2, psi0, sites)
     V_nn = 2 * pi * 60 * (10^6)
-    V_nnn = 2 * pi * 2.3 * (10^6)
-    rabi_f = 2 * pi * 6.4 * (10^6)
     C6 = 2 * pi * 275 * 10^9 # Interaction Coefficient for n (quantum number) = 61 (Hz)
     a = 6
 
@@ -367,17 +409,17 @@ function frequencies(N, resolution, separation_assumption, start, stop, stop2, p
     Y = freq
     X = collect(range(0.0, stop=stop2, length=resolution))
 
-    numbers = Array{Float64}(undef, length(Y), length(X))
+    numbers = zeros(Float64, resolution, resolution)
 
     for i = 1:length(Y)
         for j = 1:length(X)
             println((i - 1) * length(X) + j)
-            numbers[i, j] = avg_rydberg(ground_state(N, psi0, sites, Y[i], X[j] * Y[i])[3])
+            rabi_freq = Y[length(Y)-i+1]
+            numbers[i, j] = avg_rydberg(ground_state(N, psi0, sites, rabi_freq, X[j] * rabi_freq)[3])
         end
     end
 
     Y = sort(((Y .^ (-1 / 6)) .* C6^(1 / 6)) ./ a)
-    numbers = reverse(numbers)
     # Y = log2.(Y)
 
     deltaX = (maximum(X) - minimum(X)) / length(X)
@@ -387,10 +429,13 @@ function frequencies(N, resolution, separation_assumption, start, stop, stop2, p
     adjusted_xlims = (minimum(X) - 0.5 * deltaX, maximum(X) + 0.5 * deltaX)
     adjusted_ylims = (minimum(Y) - 0.5 * deltaY, maximum(Y) + 0.5 * deltaY)
 
+    hover_text = [["Cell ($i, $j): value=$(numbers[i,j])" for j in 1:resolution] for i in 1:resolution]
+
     return heatmap(
         X, Y, numbers,
         # xlims=adjusted_xlims,
         # ylims=adjusted_ylims,
+        hover=hover_text,
         color=:viridis,
         aspect_ratio=:auto,
         xlabel="Δ/Ω",
@@ -401,8 +446,6 @@ end
 
 function frequencies_derivative(N, resolution, separation_assumption, start, stop, stop2, psi0, sites)
     V_nn = 2 * pi * 60 * (10^6)
-    V_nnn = 2 * pi * 2.3 * (10^6)
-    rabi_f = 2 * pi * 6.4 * (10^6)
     C6 = 2 * pi * 275 * 10^9 # Interaction Coefficient for n (quantum number) = 61 (Hz)
     a = 6
 
@@ -484,12 +527,71 @@ function frequencies_derivative(N, resolution, separation_assumption, start, sto
     )
 end
 
+function energy_gap_plot(N, resolution, separation_assumption, start, stop, stop2, psi0, sites)
+    V_nn = 2 * pi * 60 * (10^6)
+    C6 = 2 * pi * 275 * 10^9 # Interaction Coefficient for n (quantum number) = 61 (Hz)
+    a = 6
+
+    freq = (10 .^ range(start, stop=stop, length=resolution)) .* V_nn
+
+    Y = freq
+
+    X = collect(range(0.0, stop=stop2, length=resolution))
+
+    gaps = zeros(Float64, resolution, resolution)
+
+    for i = 1:length(Y)
+        for j = 1:length(X)
+            println((i - 1) * length(X) + j)
+            # println(Y[i])
+            # println(X[j] * Y[i])
+            # println(energy_gap(N, psi0, sites, Y[i], X[j] * Y[i]))
+            # println()
+            rabi_freq = Y[length(Y)-i+1]
+            gaps[i, j] = log(abs(energy_gap(N, psi0, sites, rabi_freq, X[j] * rabi_freq)))
+        end
+    end
+
+    Y = sort(((Y .^ (-1 / 6)) .* C6^(1 / 6)) ./ a)
+    # Y = log2.(Y)
+
+    deltaX = (maximum(X) - minimum(X)) / length(X)
+    deltaY = (maximum(Y) - minimum(Y)) / length(Y)
+
+    # Adjust the plot limits to ensure cells are not cut off
+    adjusted_xlims = (minimum(X) - 0.5 * deltaX, maximum(X) + 0.5 * deltaX)
+    adjusted_ylims = (minimum(Y) - 0.5 * deltaY, maximum(Y) + 0.5 * deltaY)
+
+    return heatmap(
+        X, Y, gaps,
+        # xlims=adjusted_xlims,
+        # ylims=adjusted_ylims,
+        color=:viridis,
+        aspect_ratio=:auto,
+        xlabel="Δ/Ω",
+        ylabel="R_b/a",
+        colorbar_title="Bipartite Entropy"
+    )
+end
+
+function test_sample_states()
+    N = 9
+    a = 6
+    C6 = 2 * pi * 275 * 10^9
+    sites = siteinds("S=1/2", N)
+    psi0 = MPS(sites, ["Dn" for i = 1:N])
+    rabi_f = (0.5 * a / (C6^(1 / 6)))^(-6)
+    delt = 0
+    entr, energ, gs = ground_state(N, psi0, sites, rabi_f, delt)
+    println(measure_mps(gs))
+end
+
 function main()
     # N = [40]
-    resolution = 30
+    resolution = 22
     separation_assumption = 2
     plots_matrix = []
-    N = 24
+    N = 12
     # for i = 1:length(N)
     #     println(i)
     #     sites = siteinds("S=1/2", N[i])
@@ -499,10 +601,12 @@ function main()
     #     push!(plots_matrix, second(N[i], resolution, separation_assumption, -4, 2, -4, 3, psi0, sites))
     #     # push!(plots_matrix, qpt(N[i], resolution, separation_assumption, -3, 3, 5))
     # end
+
     sites = siteinds("S=1/2", N)
     psi0 = MPS(sites, ["Dn" for i = 1:N])
-    push!(plots_matrix, frequencies(N, resolution, separation_assumption, -6, -1.8, 4, psi0, sites))
-    push!(plots_matrix, stand(N, resolution, separation_assumption, -6, -1.8, 4, psi0, sites))
+    push!(plots_matrix, energy_gap_plot(N, resolution, separation_assumption, -6.7, 2, 18, psi0, sites))
+    # push!(plots_matrix, frequencies(N, resolution, separation_assumption, -3.7, 2, 4, psi0, sites))
+
     # sites = siteinds("S=1/2", N)
     # psi0 = MPS(sites, [i%separation_assumption == 1 ? "Up" : "Dn" for i=1:N]) # Spin down is ground state
     # push!(plots_matrix, stand(N, resolution, separation_assumption, -4.5, 3, 3.5, psi0, sites))
@@ -514,8 +618,8 @@ function main()
     # combined_ = plot(stand(N, resolution, separation_assumption, -3, 3, 5), , layout=(3, 1), size=(600, 800))
     # combined_ = plot(plots_matrix..., layout=(length(N), 2), size=(1100, length(N)*300))
     # combined_ = plot(plots_matrix..., layout=(2, 1), size=(1100, 300))
-    combined_ = plot(plots_matrix..., layout=(1, 2), size=(1100, 300))
-    savefig(combined_, "qpt24.png")
+    combined_ = plot(plots_matrix..., layout=(1, 1), size=(550, 300))
+    savefig(combined_, "energy_gap_12.png")
     return
 end
 
