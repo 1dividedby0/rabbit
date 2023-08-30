@@ -63,8 +63,25 @@ function kagome_distance(i, j, k, l)
     return sqrt((j - l + 0.5)^2 + ((i - k) * sqrt(3) / 2)^2)
 end
 
+function kagome_ladder_distance(i, j, k, l)
+    J1 = 1
+    J2 = sqrt(2)
+    J3 = 2
+
+
+end
+
+# returns the distance between two sites on a square lattice
 function square_distance(i, j, k, l)
     return sqrt((j - l)^2 + (k - i)^2)
+end
+
+# returns the distance between two sites on a rhombic lattice
+function rhombus_distance(i, j, k, l, theta)
+    a1 = (k - i) .* [cos(theta), sin(theta)]
+    a2 = (l - j) .* [1, 0]
+
+    return norm(a1 .+ a2)
 end
 
 function interaction_strength(i, j, k, l, geometry)
@@ -79,6 +96,48 @@ function interaction_strength(i, j, k, l, geometry)
     end
 
     return (C6 / distance * lattice_spacing)^6
+end
+
+function kagome_ladder_site(k, l)
+    if k % 2 == 0 && (l == 1 || l == 3)
+        return false
+    end
+
+    if k % 2 == 1 && l == 2
+        return false
+    end
+
+    return true
+end
+
+function kagome_ladder_interactions(site, N1)
+    JX = 1
+    JY = 1
+    JZ = sqrt(2)
+
+    os = OpSum()
+    long_neighbor = 1
+    if site % 3 == 1 # axial spin
+        os += JX, "ProjUp", site - 1, "ProjUp", site
+        os += JY, "ProjUp", site - 2, "ProjUp", site
+        os += JZ, "ProjUp", site - 3, "ProjUp", site
+    elseif site % 3 == 2
+        os += JX, "ProjUp", site - 1, "ProjUp", site
+        os += 2 * JX, "ProjUp", site - 2, "ProjUp", site
+        os += JZ, "ProjUp", site - 3, "ProjUp", site
+    elseif site % 3 == 0
+        os += J1 * sqrt(2), "ProjUp", site - 1, "ProjUp", site
+        os += J1, "ProjUp", site - 2, "ProjUp", site
+        os += J2, "ProjUp", site - 3, "ProjUp", site
+    end
+
+    for site2 = long_neighbor:site-1
+        k, l = snake_site(site2, N1)
+        if kagome_ladder_site(k, l) == true
+            os += interaction_strength(i, j, k, l, "square"), "ProjUp", site2, "ProjUp", site
+        end
+    end
+    return os
 end
 
 function kagome_interactions(site, i, j, N1, N2)
@@ -102,6 +161,17 @@ function snake_site(site, N1)
         return (site - 1) ÷ N1 + 1, (site - 1) % N1 + 1
     end
     return (site - 1) ÷ N1 + 1, site % N1 + 1
+end
+
+function rhombus_interactions(site, N1, N2, theta)
+    i, j = snake_site(site, N1)
+
+    os = OpSum()
+    for site2 = 1:site-1
+        k, l = snake_site(site2, N1)
+        os += interaction_strength(i, j, k, l, "rhombus", theta), "ProjUp", site2, "ProjUp", site
+    end
+    return os
 end
 
 function square_interactions(site, N1)
