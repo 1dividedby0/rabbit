@@ -71,28 +71,46 @@ function kagome_ladder_distance(i, j, k, l)
 
 end
 
-# returns the distance between two sites on a square lattice
-function square_distance(i, j, k, l)
-    return sqrt((j - l)^2 + (k - i)^2)
-end
-
 # returns the distance between two sites on a rhombic lattice
 function rhombus_distance(i, j, k, l, theta)
-    a1 = (k - i) .* [cos(theta), sin(theta)]
-    a2 = (l - j) .* [1, 0]
+    theta_local = theta
+    if (l - j > 0 && k - i > 0) || (l - j < 0 && k - i < 0)
+        theta_local = pi - theta
+    end
 
-    return norm(a1 .+ a2)
+    distance = 0
+    if i == k
+        distance = abs(l - j)
+    elseif j == l
+        distance = abs(k - i)
+    else
+        distance = sqrt((k - i)^2 + (l - j)^2 - 2 * abs(k - i) * abs(l - j) * cos(theta_local))
+    end
+
+    # if distance > 3
+    #     return -1
+    # end
+
+    return distance
 end
 
-function interaction_strength(i, j, k, l, geometry)
+function interaction_strength(i, j, k, l, geometry, theta)
     # C6 = 2 * pi * 275 * 10^9 # Interaction Coefficient for n (quantum number) = 61 (Hz)
     C6 = 1
     lattice_spacing = 1 # lattice constant (micrometers)
     distance = 0
     if geometry == "kagome"
         distance = kagome_distance(i, j, k, l)
-    elseif geometry == "square"
-        distance = square_distance(i, j, k, l)
+    elseif geometry == "rhombus"
+        distance = rhombus_distance(i, j, k, l, theta)
+    end
+
+    if distance == -1
+        return 0
+    end
+
+    if distance == 0
+        distance = 1E-3
     end
 
     return (C6 / distance * lattice_spacing)^6
@@ -158,35 +176,29 @@ end
 # returns i, j
 function snake_site(site, N1)
     if ((site - 1) ÷ N1 + 1) % 2 == 0
-        return (site - 1) ÷ N1 + 1, (site - 1) % N1 + 1
+        return (site - 1) ÷ N1 + 1, N1 - ((site - 1) % N1 + 1) + 1
     end
-    return (site - 1) ÷ N1 + 1, site % N1 + 1
+    return (site - 1) ÷ N1 + 1, (site - 1) % N1 + 1
 end
 
-function rhombus_interactions(site, N1, N2, theta)
+function rhombus_interactions(site, N1, theta)
     i, j = snake_site(site, N1)
 
     os = OpSum()
     for site2 = 1:site-1
         k, l = snake_site(site2, N1)
-        os += interaction_strength(i, j, k, l, "rhombus", theta), "ProjUp", site2, "ProjUp", site
+        V = interaction_strength(i, j, k, l, "rhombus", theta)
+        if V == Inf || V == Inf64
+            println("i: $i, j: $j, k: $k, l: $l")
+        end
+        if V != 0
+            os += V, "ProjUp", site2, "ProjUp", site
+        end
     end
     return os
 end
 
-function square_interactions(site, N1)
-    os = OpSum()
-
-    i, j = snake_site(site, N1)
-
-    for site2 = 1:site-1
-        k, l = snake_site(site2, N1)
-        os += interaction_strength(i, j, k, l, "square"), "ProjUp", site2, "ProjUp", site
-    end
-    return os
-end
-
-function rydberg_hamiltonian(geometry, N1, N2, rabi_f, delt)
+function rydberg_hamiltonian(geometry, N1, N2, theta, rabi_f, delt)
     os = OpSum()
 
     if geometry == "kagome"
@@ -203,11 +215,11 @@ function rydberg_hamiltonian(geometry, N1, N2, rabi_f, delt)
         end
     end
 
-    if geometry == "square"
+    if geometry == "rhombus"
         for site = 1:N1*N2
             os += 0.5 * rabi_f, "X", site
             os -= delt, "ProjUp", site
-            os += square_interactions(site, N1)
+            os += rhombus_interactions(site, N1, theta)
         end
     end
 
@@ -242,12 +254,12 @@ function bipartite_entropy(psi)
     return SvN
 end
 
-function ground_state(geometry, N1, N2, psi0, sites, rabi_f, delt, ed_, krylov_dim=3)
-    H = MPO(rydberg_hamiltonian(geometry, N1, N2, rabi_f, delt), sites)
+function ground_state(geometry, N1, N2, theta, psi0, sites, rabi_f, delt, ed_, krylov_dim=3)
+    H = MPO(rydberg_hamiltonian(geometry, N1, N2, theta, rabi_f, delt), sites)
 
-    nsweeps = 15
-    # maxdim = [100, 100, 200, 200, 400]
-    maxdim = [400, 800, 1600, 2000]
+    nsweeps = 20
+    maxdim = [1200]
+    # maxdim = [400, 800, 1600]
     # maxdim = fill(100,nsweeps)
     cutoff = 1E-10
 
@@ -277,12 +289,13 @@ function ground_state(geometry, N1, N2, psi0, sites, rabi_f, delt, ed_, krylov_d
     return entropy, energy, psi
 end
 
-function first_excitation(geometry, N1, N2, psi0, ground_psi, sites, rabi_f, delt)
-    H = MPO(rydberg_hamiltonian(geometry, N1, N2, rabi_f, delt), sites)
+function first_excitation(geometry, N1, N2, theta, psi0, ground_psi, sites, rabi_f, delt)
+    H = MPO(rydberg_hamiltonian(geometry, N1, N2, theta, rabi_f, delt), sites)
 
     nsweeps = 15
+    maxdim = [100, 100, 200, 500, 800]
     # maxdim = [100, 100, 100, 100, 100, 100, 200, 500, 1000]
-    maxdim = [400, 800, 1600, 2000]
+    # maxdim = [400, 800, 1600]
     cutoff = 1E-10
     weight = 1E6
 
@@ -291,7 +304,15 @@ function first_excitation(geometry, N1, N2, psi0, ground_psi, sites, rabi_f, del
     noise = 1E-11
 
     obs = RydbergObserver(etol)
-    energy, excited_psi = dmrg(H, [ground_psi], psi0; nsweeps, maxdim, cutoff, weight=weight, noise=noise, outputlevel=0, println=false)
+
+    energy = 0
+    excited_psi = 0
+
+    try
+        energy, excited_psi = dmrg(H, [ground_psi], psi0; nsweeps, maxdim, cutoff, weight=weight, noise=noise, outputlevel=0, println=false)
+    catch e
+        energy = -1
+    end
 
     # println(inner(excited_psi, ground_psi))
     return energy, excited_psi
@@ -326,7 +347,7 @@ end
 
 function get_neighbor(arr::Array{MPS,2}, x::Int, y::Int)
     # Potential neighbors' directions
-    directions = [(-1, 0), (0, -1)]
+    directions = [(1, 0), (0, 1), (0, -1), (-1, 0)]
 
     for (dx, dy) in directions
         nx, ny = x + dx, y + dy
@@ -342,14 +363,14 @@ function get_neighbor(arr::Array{MPS,2}, x::Int, y::Int)
     return nothing
 end
 
-function focus(geometry, N1, N2, x, y, psi0, sites)
+function focus(geometry, N1, N2, x, y, theta, psi0, sites)
     C6 = 1
     a = 1
 
     rabi_freq = C6 / ((a * y)^6)
     delta = x * rabi_freq
 
-    _, _, gs = ground_state(geometry, N1, N2, psi0, sites, rabi_freq, delta, false)
+    _, _, gs = ground_state(geometry, N1, N2, theta, psi0, sites, rabi_freq, delta, false)
 
     excitation = zeros(Float64, N2, N1)
 
@@ -369,7 +390,16 @@ function focus(geometry, N1, N2, x, y, psi0, sites)
     )
 end
 
-function stand(geometry, N1, N2, resolution, coarse, separation_assumption, start, stop, stop2, psi0, sites, ed_=true, krylov_dim=3)
+function element_exists_at_index(arr, a, b)
+    try
+        _ = arr[a, b]
+        return true
+    catch e
+        return false
+    end
+end
+
+function stand(geometry, N1, N2, theta, resolution, start, stop, stop2, psi0, sites, grounds, exciteds, ed_=true, krylov_dim=3)
     V_nn = 2 * pi * 60 * (10^6)
     V_nn = 1
     C6 = 1 # Interaction Coefficient for n (quantum number) = 61 (Hz)
@@ -405,8 +435,8 @@ function stand(geometry, N1, N2, resolution, coarse, separation_assumption, star
         next!(p)
         # end
 
-        i = (k - 1) ÷ resolution + 1
-        j = (k - 1) % resolution + 1
+        i, j = snake_site(k, resolution)
+        # i, j = (k - 1) ÷ N1 + 1, (k - 1) % N1 + 1
 
         # println((i - 1) * length(X) + j)
         # if ((i - 1) * resolution + j) % 5 == 0
@@ -416,19 +446,34 @@ function stand(geometry, N1, N2, resolution, coarse, separation_assumption, star
         rabi_freq = C6 / ((a * Y[i])^6)
         delta = X[j] * rabi_freq
 
+        psi0_candidate = psi0
+
+        # if element_exists_at_index(grounds, i, j)
+        #     psi0_candidate = grounds[i, j]
+        # else
         psi0_candidate = get_neighbor(ground_states, i, j)
-        if psi0_candidate !== nothing
-            psi0 = psi0_candidate
+        if psi0_candidate === nothing
+            psi0_candidate = psi0
         end
+        # end
 
+        # println(theta)
+        # println(psi0_candidate)
 
-        entropy, energy, gs = ground_state(geometry, N1, N2, psi0, sites, rabi_freq, delta, ed_, krylov_dim)
+        entropy, energy, gs = ground_state(geometry, N1, N2, theta, psi0_candidate, sites, rabi_freq, delta, ed_, krylov_dim)
 
+        psi0_candidate = psi0
+
+        # if element_exists_at_index(exciteds, i, j)
+        #     psi0_candidate = exciteds[i, j]
+        # else
         psi0_candidate = get_neighbor(excited_states, i, j)
-        if psi0_candidate !== nothing
-            psi0 = psi0_candidate
+        if psi0_candidate === nothing
+            psi0_candidate = psi0
         end
-        energy2, s2 = first_excitation(geometry, N1, N2, psi0, gs, sites, rabi_freq, delta)
+        # end
+
+        energy2, s2 = first_excitation(geometry, N1, N2, theta, psi0_candidate, gs, sites, rabi_freq, delta)
 
         ground_states[i, j] = gs
         excited_states[i, j] = s2
@@ -465,7 +510,7 @@ function stand(geometry, N1, N2, resolution, coarse, separation_assumption, star
     adjusted_xlims = (minimum(X) - 0.5 * deltaX, maximum(X) + 0.5 * deltaX)
     adjusted_ylims = (minimum(Y) - 0.5 * deltaY, maximum(Y) + 0.5 * deltaY)
 
-    return simulation_data, heatmap(
+    return ground_states, excited_states, heatmap(
         X, Y, energy_gaps,
         # xlims=adjusted_xlims,
         # ylims=adjusted_ylims,
@@ -498,18 +543,43 @@ function stand(geometry, N1, N2, resolution, coarse, separation_assumption, star
     )
 end
 
-geometry = "square"
-N1 = 24 # x
-N2 = 2 # y
-resolution = 30
-coarse_resolution = 4
-separation_assumption = 2
-sites = siteinds("Qubit", N1 * N2)
-psi0 = MPS(sites, ["Dn" for i = 1:N1*N2])
-krylov_dim = 20
-simulation_data1, plot1, plot2, plot3 = stand(geometry, N1, N2, resolution, coarse_resolution, separation_assumption, 1.0, 3.0, 4, psi0, sites, false, krylov_dim)
-plot_ = plot(plot1, plot2, plot3, layout=(3, 1), size=(500, 800))
-savefig(plot_, geometry * "_rydberg_ladder_" * string(N1) * "_" * string(N2) * "new.png")
+function sweep_theta(N1, N2, resolution, theta_res)
+    geometry = "rhombus"
+    sites = siteinds("Qubit", N1 * N2)
+    psi0 = MPS(sites, ["Dn" for i = 1:N1*N2])
+    krylov_dim = 20
+
+    theta_array = range(0.1, stop=π / 2, length=theta_res)
+
+    grounds = Array{MPS}(undef, resolution, resolution)
+    exciteds = Array{MPS}(undef, resolution, resolution)
+
+    for theta in theta_array
+        # theta = 0.1
+        grounds, exciteds, plot1, plot2, plot3 = stand(geometry, N1, N2, theta, resolution, 1.0, 3.0, 4, psi0, sites, grounds, exciteds, false, krylov_dim)
+        plot_ = plot(plot1, plot2, plot3, layout=(3, 1), size=(500, 800))
+        savefig(plot_, geometry * "_rydberg_size_" * string(N1) * "_" * string(N2) * "_angle_" * string(theta) * ".png")
+    end
+end
+
+# geometry = "rhombus"
+# # N1 = 24 # x
+# # N2 = 2 # y
+# # resolution = 30
+# N1 = 10 # x
+# N2 = 2 # y
+# resolution = 30
+# coarse_resolution = 4
+# separation_assumption = 2
+# sites = siteinds("Qubit", N1 * N2)
+# psi0 = MPS(sites, ["Dn" for i = 1:N1*N2])
+# krylov_dim = 20
+# theta = 0
+# grounds, exciteds, plot1, plot2, plot3 = stand(geometry, N1, N2, theta, resolution, coarse_resolution, separation_assumption, 1.0, 3.0, 4, psi0, sites, false, krylov_dim)
+# plot_ = plot(plot1, plot2, plot3, layout=(3, 1), size=(500, 800))
+# savefig(plot_, geometry * "_rydberg_size_" * string(N1) * "_" * string(N2) * "_angle_" * string(theta) * ".png")
 
 # plot1 = focus(geometry, N1, N2, 4.0, 1.4, psi0, sites)
 # savefig(plot1, geometry * "_rydberg_striated_ladder_" * string(N1) * ".png")
+
+sweep_theta(2, 10, 30, 10)
